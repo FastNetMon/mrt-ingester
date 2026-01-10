@@ -1,4 +1,4 @@
-# mrt_rs
+# mrt_ingester
 
 High-performance parser for MRT (Multi-threaded Routing Toolkit) routing data files.
 
@@ -38,14 +38,14 @@ fn main() -> std::io::Result<()> {
     let file = File::open("updates.mrt")?;
     let mut reader = BufReader::new(file);
 
-    while let Some((header, record)) = mrt_rs::read(&mut reader)? {
+    while let Some((header, record)) = mrt_ingester::read(&mut reader)? {
         println!("Timestamp: {}, Type: {}", header.timestamp, header.record_type);
 
         match record {
-            mrt_rs::Record::BGP4MP(bgp4mp) => {
+            mrt_ingester::Record::BGP4MP(bgp4mp) => {
                 // Handle BGP4MP record
             }
-            mrt_rs::Record::TABLE_DUMP_V2(table_dump) => {
+            mrt_ingester::Record::TABLE_DUMP_V2(table_dump) => {
                 // Handle TABLE_DUMP_V2 record
             }
             _ => {}

@@ -4,9 +4,11 @@ version = "0.1.0"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 description = "High-performance parser for MRT (Multi-threaded Routing Toolkit) routing data files"
-repository = "https://github.com/placeholder/mrt-ingester"
+repository = "https://github.com/nuclearcat/mrt-ingester"
+readme = "README.md"
 keywords = ["mrt", "bgp", "routing", "network", "parser"]
 categories = ["parser-implementations", "network-programming"]
+exclude = ["data.rib", "target/"]
 
 [dependencies]
 byteorder = "1"
