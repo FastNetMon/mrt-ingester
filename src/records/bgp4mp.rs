@@ -68,6 +68,7 @@ impl BGP4MP {
     ///
     /// * `header` - The MRT record header
     /// * `stream` - The input stream positioned at the record body
+    #[inline]
     pub fn parse(header: &Header, stream: &mut impl Read) -> std::io::Result<Self> {
         // Calculate actual body length for extended types
         let body_length = if header.record_type == 17 {
@@ -109,10 +110,7 @@ impl BGP4MP {
             subtypes::MESSAGE_AS4_LOCAL_ADDPATH => Ok(BGP4MP::MESSAGE_AS4_LOCAL_ADDPATH(
                 MESSAGE_AS4::parse(body_length, stream)?,
             )),
-            _ => Err(Error::new(
-                ErrorKind::InvalidData,
-                format!("invalid BGP4MP subtype: {}", header.sub_type),
-            )),
+            _ => Err(Error::new(ErrorKind::InvalidData, "invalid BGP4MP subtype")),
         }
     }
 }
@@ -148,6 +146,7 @@ impl STATE_CHANGE {
     /// - variable: local_address (4 or 16 bytes)
     /// - 2 bytes: old_state
     /// - 2 bytes: new_state
+    #[inline]
     pub fn parse(stream: &mut impl Read) -> std::io::Result<Self> {
         let peer_as = stream.read_u16::<BigEndian>()?;
         let local_as = stream.read_u16::<BigEndian>()?;
@@ -198,6 +197,7 @@ impl MESSAGE {
     /// - variable: peer_address (4 or 16 bytes)
     /// - variable: local_address (4 or 16 bytes)
     /// - remaining: BGP message
+    #[inline]
     pub fn parse(body_length: u32, stream: &mut impl Read) -> std::io::Result<Self> {
         let peer_as = stream.read_u16::<BigEndian>()?;
         let local_as = stream.read_u16::<BigEndian>()?;
@@ -251,6 +251,7 @@ impl MESSAGE_AS4 {
     /// - variable: peer_address (4 or 16 bytes)
     /// - variable: local_address (4 or 16 bytes)
     /// - remaining: BGP message
+    #[inline]
     pub fn parse(body_length: u32, stream: &mut impl Read) -> std::io::Result<Self> {
         let peer_as = stream.read_u32::<BigEndian>()?;
         let local_as = stream.read_u32::<BigEndian>()?;

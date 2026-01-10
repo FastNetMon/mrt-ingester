@@ -55,6 +55,7 @@ impl BGP {
     ///
     /// * `header` - The MRT record header
     /// * `stream` - The input stream positioned at the record body
+    #[inline]
     pub fn parse(header: &Header, stream: &mut impl Read) -> std::io::Result<Self> {
         match header.sub_type {
             subtypes::NULL => Ok(BGP::NULL),
@@ -65,10 +66,7 @@ impl BGP {
             subtypes::OPEN => Ok(BGP::OPEN(MESSAGE::parse(header, stream)?)),
             subtypes::NOTIFY => Ok(BGP::NOTIFY(MESSAGE::parse(header, stream)?)),
             subtypes::KEEPALIVE => Ok(BGP::KEEPALIVE(MESSAGE::parse(header, stream)?)),
-            _ => Err(Error::new(
-                ErrorKind::InvalidData,
-                format!("invalid BGP subtype: {}", header.sub_type),
-            )),
+            _ => Err(Error::new(ErrorKind::InvalidData, "invalid BGP subtype")),
         }
     }
 }

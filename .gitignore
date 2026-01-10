@@ -16,6 +16,7 @@ Thumbs.db
 
 # Test artifacts
 *.mrt
+*.rib
 tests/fixtures/*.mrt
 
 # Coverage

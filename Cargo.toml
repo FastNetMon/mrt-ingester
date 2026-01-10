@@ -1,10 +1,10 @@
 [package]
-name = "mrt_rs"
+name = "mrt_ingester"
 version = "0.1.0"
-edition = "2021"
+edition = "2024"
 license = "MIT OR Apache-2.0"
 description = "High-performance parser for MRT (Multi-threaded Routing Toolkit) routing data files"
-repository = "https://github.com/placeholder/mrt-rs"
+repository = "https://github.com/placeholder/mrt-ingester"
 keywords = ["mrt", "bgp", "routing", "network", "parser"]
 categories = ["parser-implementations", "network-programming"]
 
@@ -12,11 +12,16 @@ categories = ["parser-implementations", "network-programming"]
 byteorder = "1"
 
 [dev-dependencies]
-criterion = "0.5"
+criterion = { version = "0.8", features = ["html_reports"] }
+pprof = { version = "0.15", features = ["flamegraph", "criterion"] }
+memmap2 = "0.9"
 
 [[bench]]
 name = "parse_benchmark"
 harness = false
+
+[profile.bench]
+debug = true  # Enable debug symbols for profiling
 
 [profile.release]
 lto = true

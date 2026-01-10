@@ -59,16 +59,12 @@ impl TABLE_DUMP {
     /// The AFI is determined by the header subtype:
     /// - subtype 1 = AFI_IPv4
     /// - subtype 2 = AFI_IPv6
+    #[inline]
     pub fn parse(header: &Header, stream: &mut impl Read) -> std::io::Result<Self> {
         let afi = match header.sub_type {
             1 => AFI::IPV4,
             2 => AFI::IPV6,
-            _ => {
-                return Err(Error::new(
-                    ErrorKind::InvalidData,
-                    format!("invalid TABLE_DUMP subtype: {}", header.sub_type),
-                ))
-            }
+            _ => return Err(Error::new(ErrorKind::InvalidData, "invalid TABLE_DUMP subtype")),
         };
 
         let view_number = stream.read_u16::<BigEndian>()?;
@@ -132,6 +128,7 @@ pub enum TABLE_DUMP_V2 {
 
 impl TABLE_DUMP_V2 {
     /// Parse a TABLE_DUMP_V2 record.
+    #[inline]
     pub fn parse(header: &Header, stream: &mut impl Read) -> std::io::Result<Self> {
         match header.sub_type {
             subtypes::PEER_INDEX_TABLE => Ok(TABLE_DUMP_V2::PEER_INDEX_TABLE(
@@ -171,10 +168,7 @@ impl TABLE_DUMP_V2 {
             subtypes::RIB_GENERIC_ADDPATH => Ok(TABLE_DUMP_V2::RIB_GENERIC_ADDPATH(
                 RIB_GENERIC_ADDPATH::parse(stream)?,
             )),
-            _ => Err(Error::new(
-                ErrorKind::InvalidData,
-                format!("invalid TABLE_DUMP_V2 subtype: {}", header.sub_type),
-            )),
+            _ => Err(Error::new(ErrorKind::InvalidData, "invalid TABLE_DUMP_V2 subtype")),
         }
     }
 }
@@ -195,6 +189,7 @@ pub struct PEER_INDEX_TABLE {
 
 impl PEER_INDEX_TABLE {
     /// Parse a PEER_INDEX_TABLE record.
+    #[inline]
     pub fn parse(stream: &mut impl Read) -> std::io::Result<Self> {
         let collector_id = stream.read_u32::<BigEndian>()?;
         let view_name_length = stream.read_u16::<BigEndian>()? as usize;
@@ -235,20 +230,21 @@ pub struct PeerEntry {
 
 impl PeerEntry {
     /// Parse a PeerEntry from the stream.
+    #[inline]
     pub fn parse(stream: &mut impl Read) -> std::io::Result<Self> {
         let peer_type = stream.read_u8()?;
         let peer_bgp_id = stream.read_u32::<BigEndian>()?;
 
-        // Bit 1: IP address type (0 = IPv4, 1 = IPv6)
-        let is_ipv6 = (peer_type & 0x02) != 0;
+        // RFC 6396: Bit 0 = Address Family (0 = IPv4, 1 = IPv6)
+        let is_ipv6 = (peer_type & 0x01) != 0;
         let peer_ip_address = if is_ipv6 {
             IpAddr::V6(read_ipv6(stream)?)
         } else {
             IpAddr::V4(read_ipv4(stream)?)
         };
 
-        // Bit 0: AS number size (0 = 16-bit, 1 = 32-bit)
-        let is_as4 = (peer_type & 0x01) != 0;
+        // RFC 6396: Bit 1 = AS Size (0 = 16-bit, 1 = 32-bit)
+        let is_as4 = (peer_type & 0x02) != 0;
         let peer_as = if is_as4 {
             stream.read_u32::<BigEndian>()?
         } else {
@@ -277,6 +273,7 @@ pub struct RIBEntry {
 
 impl RIBEntry {
     /// Parse a RIBEntry from the stream.
+    #[inline]
     pub fn parse(stream: &mut impl Read) -> std::io::Result<Self> {
         let peer_index = stream.read_u16::<BigEndian>()?;
         let originated_time = stream.read_u32::<BigEndian>()?;
@@ -308,6 +305,7 @@ pub struct RIB_AFI {
 
 impl RIB_AFI {
     /// Parse a RIB_AFI record.
+    #[inline]
     pub fn parse(_afi: &AFI, stream: &mut impl Read) -> std::io::Result<Self> {
         let sequence_number = stream.read_u32::<BigEndian>()?;
         let prefix_length = stream.read_u8()?;
@@ -391,6 +389,7 @@ pub struct RIBEntryAddPath {
 
 impl RIBEntryAddPath {
     /// Parse a RIBEntryAddPath from the stream.
+    #[inline]
     pub fn parse(stream: &mut impl Read) -> std::io::Result<Self> {
         let peer_index = stream.read_u16::<BigEndian>()?;
         let originated_time = stream.read_u32::<BigEndian>()?;
@@ -424,6 +423,7 @@ pub struct RIB_AFI_ADDPATH {
 
 impl RIB_AFI_ADDPATH {
     /// Parse a RIB_AFI_ADDPATH record.
+    #[inline]
     pub fn parse(_afi: &AFI, stream: &mut impl Read) -> std::io::Result<Self> {
         let sequence_number = stream.read_u32::<BigEndian>()?;
         let prefix_length = stream.read_u8()?;
@@ -597,8 +597,9 @@ mod tests {
     #[test]
     fn test_peer_type_flags() {
         // Test IPv6 + 32-bit AS
+        // RFC 6396: bit 0 = IPv6 (1), bit 1 = AS4 (1) -> 0b11 = 0x03
         let data: &[u8] = &[
-            0x03,       // peer_type = 0b11 (IPv6 + AS4)
+            0x03,       // peer_type = 0b11 (bit0=IPv6, bit1=AS4)
             0x0A, 0x00, 0x00, 0x01, // peer_bgp_id
             // IPv6 address: 2001:db8::1
             0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1,
