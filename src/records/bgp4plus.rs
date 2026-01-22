@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! Legacy BGP4+ MRT record parsing (Types 9, 10).
 //!
 //! This module handles the deprecated BGP4+ record types which support

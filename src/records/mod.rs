@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! MRT record type modules.
 //!
 //! This module contains parsers for all MRT record types defined in RFC 6396.

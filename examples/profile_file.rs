@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! Profile MRT file parsing to identify bottlenecks.
 
 use std::env;

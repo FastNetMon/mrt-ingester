@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! IS-IS protocol MRT record parsing.
 //!
 //! IS-IS records contain raw IS-IS protocol data units (PDUs).

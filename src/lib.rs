@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! # mrt_ingester
 //!
 //! High-performance parser for MRT (Multi-threaded Routing Toolkit) routing data files.

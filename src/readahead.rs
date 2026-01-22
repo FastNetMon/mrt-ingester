@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! Read-ahead I/O utilities for high-performance file parsing.
 //!
 //! This module provides a threaded read-ahead reader that can significantly

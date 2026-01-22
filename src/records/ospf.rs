@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! OSPF protocol MRT record parsing.
 //!
 //! This module handles OSPFv2 (IPv4) and OSPFv3 (IPv4/IPv6) routing protocol records.

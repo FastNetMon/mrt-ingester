@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! Benchmark different read-ahead strategies for MRT file parsing.
 //!
 //! Tests: BufReader sizes, mmap, and threaded read-ahead.

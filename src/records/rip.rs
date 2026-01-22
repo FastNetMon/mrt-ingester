@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! RIP and RIPng protocol MRT record parsing.
 //!
 //! This module handles both RIP (IPv4) and RIPng (IPv6) routing protocol records.

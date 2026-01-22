@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! BGP4MP MRT record parsing (Types 16, 17).
 //!
 //! This is the modern BGP MRT record format supporting both IPv4 and IPv6 peers,

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! Benchmark parsing a real MRT file.
 //!
 //! Usage: cargo run --release --example bench_file <path_to_mrt_file>

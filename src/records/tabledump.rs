@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! TABLE_DUMP and TABLE_DUMP_V2 MRT record parsing (Types 12, 13).
 //!
 //! These record types contain RIB (Routing Information Base) dumps,
