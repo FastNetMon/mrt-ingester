@@ -47,10 +47,59 @@
 //! ```
 
 use byteorder::{BigEndian, ReadBytesExt};
-use std::io::{Error, ErrorKind, Read};
+use std::fs::File;
+use std::io::{BufReader, Error, ErrorKind, Read};
+use std::path::Path;
 
 pub mod records;
 pub mod readahead;
+
+/// Open an MRT file for reading, transparently decompressing gzip (`.gz`) data.
+///
+/// Detection is by magic bytes (`1F 8B`), not by file extension — so `foo.mrt`
+/// containing gzip data is handled correctly, and a misnamed `foo.gz` that is
+/// actually plain MRT is also handled correctly.
+///
+/// Returns a buffered reader suitable for passing to [`read`].
+///
+/// # Example
+///
+/// ```no_run
+/// let mut reader = mrt_ingester::open("rib.20260101.0000.bz2.mrt.gz").unwrap();
+/// while let Some((header, record)) = mrt_ingester::read(&mut reader).unwrap() {
+///     // Process record
+/// }
+/// ```
+pub fn open<P: AsRef<Path>>(path: P) -> std::io::Result<Box<dyn Read>> {
+    let mut file = File::open(path.as_ref())?;
+    let mut magic = [0u8; 2];
+    let read = read_full_or_partial(&mut file, &mut magic)?;
+
+    // Re-attach the bytes we peeked so the chosen decoder sees them.
+    let prefix = std::io::Cursor::new(magic[..read].to_vec());
+    let chained: Box<dyn Read> = Box::new(prefix.chain(file));
+
+    if read == 2 && magic == [0x1F, 0x8B] {
+        Ok(Box::new(BufReader::with_capacity(
+            1 << 20,
+            flate2::read::MultiGzDecoder::new(chained),
+        )))
+    } else {
+        Ok(Box::new(BufReader::with_capacity(1 << 20, chained)))
+    }
+}
+
+/// Like `read_exact` but tolerates short EOF — returns how many bytes were actually read.
+fn read_full_or_partial(mut r: impl Read, buf: &mut [u8]) -> std::io::Result<usize> {
+    let mut filled = 0;
+    while filled < buf.len() {
+        match r.read(&mut buf[filled..])? {
+            0 => break,
+            n => filled += n,
+        }
+    }
+    Ok(filled)
+}
 
 // Re-export record modules at crate root for API compatibility
 pub use records::bgp;

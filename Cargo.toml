@@ -12,6 +12,7 @@ exclude = ["data.rib", "target/"]
 
 [dependencies]
 byteorder = "1"
+flate2 = "1"
 
 [dev-dependencies]
 criterion = { version = "0.8", features = ["html_reports"] }
