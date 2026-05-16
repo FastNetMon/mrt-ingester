@@ -1,10 +1,10 @@
 [package]
 name = "mrt_ingester"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 description = "High-performance parser for MRT (Multi-threaded Routing Toolkit) routing data files"
-repository = "https://github.com/nuclearcat/mrt-ingester"
+repository = "https://github.com/fastnetmon/mrt-ingester"
 readme = "README.md"
 keywords = ["mrt", "bgp", "routing", "network", "parser"]
 categories = ["parser-implementations", "network-programming"]
