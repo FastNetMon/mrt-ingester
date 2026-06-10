@@ -5,9 +5,53 @@
 //! Run with: cargo bench
 //! Run with profiling: cargo bench --bench parse_benchmark -- --profile-time=5
 
-use criterion::{black_box, criterion_group, criterion_main, Criterion, BenchmarkId};
-use pprof::criterion::{Output, PProfProfiler};
+use criterion::profiler::Profiler;
+use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
+use pprof::ProfilerGuard;
+use std::fs::File;
+use std::hint::black_box;
 use std::io::Cursor;
+use std::path::Path;
+
+/// Criterion profiler hook that captures a pprof flamegraph per benchmark.
+///
+/// pprof's built-in `criterion` feature is pinned to criterion 0.5, so we
+/// implement the `Profiler` trait ourselves against pprof's core API.
+struct FlamegraphProfiler<'a> {
+    frequency: i32,
+    active_profiler: Option<ProfilerGuard<'a>>,
+}
+
+impl<'a> FlamegraphProfiler<'a> {
+    fn new(frequency: i32) -> Self {
+        Self {
+            frequency,
+            active_profiler: None,
+        }
+    }
+}
+
+impl<'a> Profiler for FlamegraphProfiler<'a> {
+    fn start_profiling(&mut self, _benchmark_id: &str, _benchmark_dir: &Path) {
+        self.active_profiler = Some(
+            ProfilerGuard::new(self.frequency).expect("failed to start pprof profiler"),
+        );
+    }
+
+    fn stop_profiling(&mut self, _benchmark_id: &str, benchmark_dir: &Path) {
+        if let Some(profiler) = self.active_profiler.take() {
+            std::fs::create_dir_all(benchmark_dir).expect("failed to create profile directory");
+            let file = File::create(benchmark_dir.join("flamegraph.svg"))
+                .expect("failed to create flamegraph.svg");
+            profiler
+                .report()
+                .build()
+                .expect("failed to build pprof report")
+                .flamegraph(file)
+                .expect("failed to write flamegraph");
+        }
+    }
+}
 
 fn benchmark_read_null_record(c: &mut Criterion) {
     let data: Vec<u8> = vec![
@@ -166,7 +210,7 @@ criterion_group!(
 // Profiled criterion group - generates flamegraphs
 criterion_group!(
     name = profiled;
-    config = Criterion::default().with_profiler(PProfProfiler::new(100, Output::Flamegraph(None)));
+    config = Criterion::default().with_profiler(FlamegraphProfiler::new(100));
     targets = benchmark_read_with_buffer_reuse, benchmark_bgp4mp_messages, benchmark_table_dump_v2
 );
 
