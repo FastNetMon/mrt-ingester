@@ -6,11 +6,11 @@
 //! Run with profiling: cargo bench --bench parse_benchmark -- --profile-time=5
 
 use criterion::profiler::Profiler;
-use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
+use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use pprof::ProfilerGuard;
 use std::fs::File;
 use std::hint::black_box;
-use std::io::Cursor;
+use std::io::{Cursor, Read};
 use std::path::Path;
 
 /// Criterion profiler hook that captures a pprof flamegraph per benchmark.
@@ -198,6 +198,111 @@ fn benchmark_table_dump_v2(c: &mut Criterion) {
     group.finish();
 }
 
+/// Parse real-world MRT data — the most diverse workload available, exercising
+/// the full record/attribute mix of an actual RIB dump rather than synthetic
+/// records. Use this benchmark to compare builds (e.g. baseline vs
+/// `RUSTFLAGS="-C target-cpu=native"`).
+///
+/// Reads the file named by `MRT_BENCH_FILE` (default `../mrt/data.rib.gz`,
+/// gzip handled transparently), decompresses the first 64 MB into memory once,
+/// then measures pure in-memory parse throughput. Skipped with a notice if the
+/// file is missing, so `cargo bench` still works without data.
+fn benchmark_real_file(c: &mut Criterion) {
+    const SAMPLE_LIMIT: u64 = 64 * 1024 * 1024;
+
+    let path = std::env::var("MRT_BENCH_FILE").unwrap_or_else(|_| "../mrt/data.rib.gz".to_string());
+    let data = match mrt_ingester::open(&path) {
+        Ok(reader) => {
+            let mut data = Vec::with_capacity(SAMPLE_LIMIT as usize);
+            reader
+                .take(SAMPLE_LIMIT)
+                .read_to_end(&mut data)
+                .expect("failed to read sample from MRT file");
+            data
+        }
+        Err(e) => {
+            eprintln!("skipping real_file benchmarks: cannot open {path}: {e} (set MRT_BENCH_FILE)");
+            return;
+        }
+    };
+
+    let mut group = c.benchmark_group("real_file");
+    group.throughput(Throughput::Bytes(data.len() as u64));
+    group.sample_size(20);
+
+    // The sample is truncated mid-record; the parse loop simply stops at the
+    // first incomplete record.
+    group.bench_function("read", |b| {
+        b.iter(|| {
+            let mut cursor = Cursor::new(&data);
+            let mut count = 0u64;
+            while let Ok(Some(_)) = mrt_ingester::read(&mut cursor) {
+                count += 1;
+            }
+            black_box(count)
+        })
+    });
+
+    group.bench_function("read_with_buffer", |b| {
+        b.iter(|| {
+            let mut cursor = Cursor::new(&data);
+            let mut body_buf = Vec::with_capacity(64 * 1024);
+            let mut count = 0u64;
+            while let Ok(Some(_)) = mrt_ingester::read_with_buffer(&mut cursor, &mut body_buf) {
+                count += 1;
+            }
+            black_box(count)
+        })
+    });
+
+    // Zero-copy path. Walks every entry and touches its attribute bytes so the
+    // work is comparable to the owned variants (which copy attributes out).
+    group.bench_function("read_zero_copy", |b| {
+        b.iter(|| {
+            let mut cursor = Cursor::new(&data);
+            let mut body_buf = Vec::with_capacity(64 * 1024);
+            let mut count = 0u64;
+            let mut attr_bytes = 0u64;
+            while let Ok(Some((_header, record))) =
+                mrt_ingester::read_ref(&mut cursor, &mut body_buf)
+            {
+                count += 1;
+                if let mrt_ingester::RecordRef::RIB(rib) = record {
+                    for entry in rib.entries() {
+                        let Ok(entry) = entry else { break };
+                        attr_bytes += entry.attributes.len() as u64;
+                    }
+                }
+            }
+            black_box((count, attr_bytes))
+        })
+    });
+
+    // Slice path: parses directly from the in-memory sample — the same shape
+    // as an mmap'd file — with no body copy at all.
+    group.bench_function("read_slice", |b| {
+        b.iter(|| {
+            let mut pos = 0usize;
+            let mut count = 0u64;
+            let mut attr_bytes = 0u64;
+            while let Ok(Some((_header, record))) =
+                mrt_ingester::read_ref_from_slice(&data, &mut pos)
+            {
+                count += 1;
+                if let mrt_ingester::RecordRef::RIB(rib) = record {
+                    for entry in rib.entries() {
+                        let Ok(entry) = entry else { break };
+                        attr_bytes += entry.attributes.len() as u64;
+                    }
+                }
+            }
+            black_box((count, attr_bytes))
+        })
+    });
+
+    group.finish();
+}
+
 // Standard criterion group (no profiling)
 criterion_group!(
     benches,
@@ -205,13 +310,14 @@ criterion_group!(
     benchmark_read_with_buffer_reuse,
     benchmark_bgp4mp_messages,
     benchmark_table_dump_v2,
+    benchmark_real_file,
 );
 
 // Profiled criterion group - generates flamegraphs
 criterion_group!(
     name = profiled;
     config = Criterion::default().with_profiler(FlamegraphProfiler::new(100));
-    targets = benchmark_read_with_buffer_reuse, benchmark_bgp4mp_messages, benchmark_table_dump_v2
+    targets = benchmark_read_with_buffer_reuse, benchmark_bgp4mp_messages, benchmark_table_dump_v2, benchmark_real_file
 );
 
 // Use 'benches' for normal runs, 'profiled' for flamegraph generation
