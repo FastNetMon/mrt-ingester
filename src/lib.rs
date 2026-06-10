@@ -306,13 +306,14 @@ pub fn read(stream: &mut impl Read) -> Result<Option<(Header, Record)>, Error> {
     };
 
     // Read body into buffer and parse from Cursor (faster than stream-direct for BufReader)
+    // read_to_end through Take fills the spare capacity directly, so the
+    // buffer is never zeroed and never exposed uninitialized.
     let body_len = body_length as usize;
     let mut body_buf = Vec::with_capacity(body_len);
-    // SAFETY: We immediately read_exact into this buffer
-    unsafe {
-        body_buf.set_len(body_len);
+    let n = stream.by_ref().take(body_len as u64).read_to_end(&mut body_buf)?;
+    if n != body_len {
+        return Err(Error::new(ErrorKind::UnexpectedEof, "truncated MRT record"));
     }
-    stream.read_exact(&mut body_buf)?;
 
     // Parse record based on type
     let record = parse_record(&header, &body_buf)?;
@@ -386,29 +387,224 @@ pub fn read_with_buffer(
         length,
     };
 
-    // Resize buffer and read body (reuses existing capacity when possible)
+    // The buffer never shrinks, so zero-fill happens only on growth — the
+    // steady state reads into already-initialized memory with no per-record cost.
     let body_len = body_length as usize;
-
-    // Fast path: if buffer already has enough capacity, just set length
-    if body_buf.capacity() >= body_len {
-        // SAFETY: We're about to read_exact into this buffer, capacity is sufficient
-        unsafe {
-            body_buf.set_len(body_len);
-        }
-    } else {
-        // Need to grow - use resize which handles allocation efficiently
-        body_buf.clear();
-        body_buf.reserve(body_len);
-        unsafe {
-            body_buf.set_len(body_len);
-        }
+    if body_buf.len() < body_len {
+        body_buf.resize(body_len, 0);
     }
-    stream.read_exact(body_buf)?;
+    let body = &mut body_buf[..body_len];
+    stream.read_exact(body)?;
 
     // Parse record based on type
-    let record = parse_record(&header, body_buf)?;
+    let record = parse_record(&header, body)?;
 
     Ok(Some((header, record)))
+}
+
+/// Record parsed by [`read_ref`]: zero-copy where it pays off, owned otherwise.
+#[derive(Debug)]
+pub enum RecordRef<'a> {
+    /// TABLE_DUMP_V2 RIB record (subtypes 2-5, 8-11) borrowing the body buffer
+    RIB(tabledump::RibRef<'a>),
+    /// Any other record type, parsed into the owned [`Record`] representation
+    Owned(Record),
+}
+
+/// Reads the next MRT record, borrowing record data from `body_buf` instead
+/// of copying it into per-record allocations.
+///
+/// TABLE_DUMP_V2 RIB records — the bulk of a RIB dump — are returned as
+/// [`RecordRef::RIB`], a zero-copy view whose prefix and per-entry attribute
+/// bytes point directly into `body_buf`. All other record types fall back to
+/// the owned [`Record`] representation.
+///
+/// The returned record borrows `body_buf`, so it must be dropped before the
+/// next call — which is the natural shape of a read loop:
+///
+/// ```no_run
+/// use std::fs::File;
+/// use std::io::BufReader;
+///
+/// let file = File::open("rib.mrt").unwrap();
+/// let mut reader = BufReader::new(file);
+/// let mut body_buf = Vec::with_capacity(65536);
+///
+/// while let Some((header, record)) = mrt_ingester::read_ref(&mut reader, &mut body_buf).unwrap() {
+///     if let mrt_ingester::RecordRef::RIB(rib) = record {
+///         for entry in rib.entries() {
+///             let entry = entry.unwrap();
+///             // entry.attributes is a &[u8] into body_buf — no copy
+///         }
+///     }
+/// }
+/// ```
+#[inline]
+pub fn read_ref<'a>(
+    stream: &mut impl Read,
+    body_buf: &'a mut Vec<u8>,
+) -> Result<Option<(Header, RecordRef<'a>)>, Error> {
+    // Read entire common header (12 bytes) in one syscall
+    let mut header_buf = [0u8; 12];
+    match stream.read_exact(&mut header_buf) {
+        Ok(()) => {}
+        Err(e) if e.kind() == ErrorKind::UnexpectedEof => return Ok(None),
+        Err(e) => return Err(e),
+    }
+
+    let timestamp = u32::from_be_bytes([header_buf[0], header_buf[1], header_buf[2], header_buf[3]]);
+    let record_type = u16::from_be_bytes([header_buf[4], header_buf[5]]);
+    let sub_type = u16::from_be_bytes([header_buf[6], header_buf[7]]);
+    let length = u32::from_be_bytes([header_buf[8], header_buf[9], header_buf[10], header_buf[11]]);
+
+    // Handle extended timestamp for *_ET types
+    let (extended, body_length) = if is_extended_type(record_type) {
+        let microseconds = stream.read_u32::<BigEndian>()?;
+        (microseconds, length.saturating_sub(4))
+    } else {
+        (0, length)
+    };
+
+    let header = Header {
+        timestamp,
+        extended,
+        record_type,
+        sub_type,
+        length,
+    };
+
+    // The buffer never shrinks, so zero-fill happens only on growth — the
+    // steady state reads into already-initialized memory with no per-record cost.
+    let body_len = body_length as usize;
+    if body_buf.len() < body_len {
+        body_buf.resize(body_len, 0);
+    }
+    stream.read_exact(&mut body_buf[..body_len])?;
+    let body: &'a [u8] = &body_buf[..body_len];
+
+    parse_record_ref(&header, body).map(|record| Some((header, record)))
+}
+
+/// Map a TABLE_DUMP_V2 RIB subtype to its (AFI, multicast, addpath) parameters.
+#[inline]
+fn rib_subtype_params(sub_type: u16) -> Option<(AFI, bool, bool)> {
+    match sub_type {
+        2 => Some((AFI::IPV4, false, false)),  // RIB_IPV4_UNICAST
+        3 => Some((AFI::IPV4, true, false)),   // RIB_IPV4_MULTICAST
+        4 => Some((AFI::IPV6, false, false)),  // RIB_IPV6_UNICAST
+        5 => Some((AFI::IPV6, true, false)),   // RIB_IPV6_MULTICAST
+        8 => Some((AFI::IPV4, false, true)),   // RIB_IPV4_UNICAST_ADDPATH
+        9 => Some((AFI::IPV4, true, true)),    // RIB_IPV4_MULTICAST_ADDPATH
+        10 => Some((AFI::IPV6, false, true)),  // RIB_IPV6_UNICAST_ADDPATH
+        11 => Some((AFI::IPV6, true, true)),   // RIB_IPV6_MULTICAST_ADDPATH
+        _ => None,
+    }
+}
+
+/// Parse a record body: zero-copy for TABLE_DUMP_V2 RIB subtypes, owned otherwise.
+#[inline]
+fn parse_record_ref<'a>(header: &Header, body: &'a [u8]) -> Result<RecordRef<'a>, Error> {
+    if header.record_type == record_types::TABLE_DUMP_V2 {
+        if let Some((afi, multicast, addpath)) = rib_subtype_params(header.sub_type) {
+            let rib = tabledump::RibRef::parse(afi, multicast, addpath, body)?;
+            return Ok(RecordRef::RIB(rib));
+        }
+    }
+    parse_record(header, body).map(RecordRef::Owned)
+}
+
+/// Reads the next MRT record directly from an in-memory byte slice, with no
+/// copying at all — not even into a reuse buffer.
+///
+/// This is the fastest path when the whole file is already in memory, e.g.
+/// memory-mapped (`memmap2`) or read into a `Vec<u8>`. When that isn't
+/// possible (sockets, pipes, compressed streams), use [`read_ref`] instead,
+/// which works on any `Read` at the cost of one body copy per record.
+///
+/// `pos` is the byte offset to parse at; on success it advances past the
+/// record, so calling in a loop walks the file:
+///
+/// ```no_run
+/// let data = std::fs::read("rib.mrt").unwrap(); // or an mmap'd slice
+/// let mut pos = 0;
+///
+/// while let Some((header, record)) = mrt_ingester::read_ref_from_slice(&data, &mut pos).unwrap() {
+///     if let mrt_ingester::RecordRef::RIB(rib) = record {
+///         for entry in rib.entries() {
+///             let entry = entry.unwrap();
+///             // entry.attributes borrows `data` directly
+///         }
+///     }
+/// }
+/// ```
+///
+/// Returns `Ok(None)` when `pos` is exactly at the end of `data`; a record
+/// truncated by the end of the slice is an `UnexpectedEof` error.
+#[inline]
+pub fn read_ref_from_slice<'a>(
+    data: &'a [u8],
+    pos: &mut usize,
+) -> Result<Option<(Header, RecordRef<'a>)>, Error> {
+    fn eof() -> Error {
+        Error::new(ErrorKind::UnexpectedEof, "truncated MRT record")
+    }
+
+    let remaining = data.get(*pos..).ok_or_else(eof)?;
+    if remaining.is_empty() {
+        return Ok(None);
+    }
+
+    let (header_buf, rest) = remaining.split_at_checked(12).ok_or_else(eof)?;
+    let timestamp = u32::from_be_bytes([header_buf[0], header_buf[1], header_buf[2], header_buf[3]]);
+    let record_type = u16::from_be_bytes([header_buf[4], header_buf[5]]);
+    let sub_type = u16::from_be_bytes([header_buf[6], header_buf[7]]);
+    let length = u32::from_be_bytes([header_buf[8], header_buf[9], header_buf[10], header_buf[11]]);
+
+    // Handle extended timestamp for *_ET types
+    let (extended, body_length, header_len) = if is_extended_type(record_type) {
+        let (us, _) = rest.split_at_checked(4).ok_or_else(eof)?;
+        let microseconds = u32::from_be_bytes([us[0], us[1], us[2], us[3]]);
+        (microseconds, length.saturating_sub(4), 16usize)
+    } else {
+        (0, length, 12usize)
+    };
+
+    let header = Header {
+        timestamp,
+        extended,
+        record_type,
+        sub_type,
+        length,
+    };
+
+    let body_start = *pos + header_len;
+    let body_end = body_start
+        .checked_add(body_length as usize)
+        .ok_or_else(eof)?;
+    let body = data.get(body_start..body_end).ok_or_else(eof)?;
+
+    // Record parsing walks a serial chain of length fields, so out-of-order
+    // execution can't hide cache misses on cold data. Prefetch a record-sized
+    // window a fixed distance ahead; consumption is sequential, so in steady
+    // state every line is requested well before the parser reaches it.
+    #[cfg(target_arch = "x86_64")]
+    {
+        use std::arch::x86_64::{_mm_prefetch, _MM_HINT_T0};
+        const PREFETCH_DISTANCE: usize = 4096;
+        let pf_start = body_start + PREFETCH_DISTANCE;
+        let pf_end = (body_end + PREFETCH_DISTANCE).min(data.len());
+        let mut off = pf_start;
+        while off < pf_end {
+            // SAFETY: off < data.len(), so the pointer is in bounds; prefetch
+            // itself has no side effects beyond the cache.
+            unsafe { _mm_prefetch(data.as_ptr().add(off) as *const i8, _MM_HINT_T0) };
+            off += 64;
+        }
+    }
+
+    *pos = body_end;
+
+    parse_record_ref(&header, body).map(|record| Some((header, record)))
 }
 
 /// Reads only the MRT header from the stream, skipping the body.
@@ -586,6 +782,65 @@ mod tests {
         assert_eq!(std::mem::size_of::<AFI>(), 2);
         assert_eq!(AFI::IPV4 as u16, 1);
         assert_eq!(AFI::IPV6 as u16, 2);
+    }
+
+    #[test]
+    fn test_read_ref_from_slice_walks_records() {
+        // NULL record followed by a RIB_IPV4_UNICAST record with one entry
+        let mut data = vec![
+            0x00, 0x00, 0x00, 0x01, // timestamp
+            0x00, 0x00, // type = NULL
+            0x00, 0x00, // subtype
+            0x00, 0x00, 0x00, 0x00, // length = 0
+        ];
+        data.extend_from_slice(&[
+            0x00, 0x00, 0x00, 0x02, // timestamp
+            0x00, 0x0D, // type = TABLE_DUMP_V2
+            0x00, 0x02, // subtype = RIB_IPV4_UNICAST
+            0x00, 0x00, 0x00, 0x14, // length = 20
+            // body (20 bytes)
+            0x00, 0x00, 0x00, 0x07, // sequence_number = 7
+            24, // prefix_length
+            192, 168, 1, // prefix
+            0x00, 0x01, // entry_count = 1
+            0x00, 0x05, // peer_index = 5
+            0x5F, 0x5E, 0x10, 0x00, // originated_time
+            0x00, 0x02, // attr_len = 2
+            0xAA, 0xBB, // attributes
+        ]);
+
+        let mut pos = 0;
+        let (h1, r1) = read_ref_from_slice(&data, &mut pos).unwrap().unwrap();
+        assert_eq!(h1.record_type, 0);
+        assert!(matches!(r1, RecordRef::Owned(Record::NULL)));
+
+        let (h2, r2) = read_ref_from_slice(&data, &mut pos).unwrap().unwrap();
+        assert_eq!(h2.record_type, 13);
+        let RecordRef::RIB(rib) = r2 else {
+            panic!("expected RIB record");
+        };
+        assert_eq!(rib.sequence_number, 7);
+        let entry = rib.entries().next().unwrap().unwrap();
+        assert_eq!(entry.peer_index, 5);
+        assert_eq!(entry.attributes, &[0xAA, 0xBB]);
+
+        // Clean EOF
+        assert!(read_ref_from_slice(&data, &mut pos).unwrap().is_none());
+        assert_eq!(pos, data.len());
+    }
+
+    #[test]
+    fn test_read_ref_from_slice_truncated() {
+        // Header claims 20-byte body but the slice ends early
+        let data: &[u8] = &[
+            0x00, 0x00, 0x00, 0x01, // timestamp
+            0x00, 0x0D, // type = TABLE_DUMP_V2
+            0x00, 0x02, // subtype
+            0x00, 0x00, 0x00, 0x14, // length = 20
+            0x00, 0x00, // truncated body
+        ];
+        let mut pos = 0;
+        assert!(read_ref_from_slice(data, &mut pos).is_err());
     }
 
     #[test]

@@ -332,6 +332,147 @@ impl RIB_AFI {
     }
 }
 
+/// Zero-copy view of a TABLE_DUMP_V2 RIB record (subtypes 2-5 and ADD-PATH 8-11).
+///
+/// Unlike [`RIB_AFI`], this borrows directly from the record body buffer:
+/// no per-entry heap allocations and no copying of attribute bytes. Entries
+/// are decoded lazily via [`RibRef::entries`].
+#[derive(Debug, Clone, Copy)]
+pub struct RibRef<'a> {
+    /// Address family of the prefix
+    pub afi: AFI,
+    /// True for the *_MULTICAST subtypes
+    pub multicast: bool,
+    /// True for the RFC 8050 ADD-PATH subtypes (entries carry a path identifier)
+    pub addpath: bool,
+    /// Sequence number within the dump
+    pub sequence_number: u32,
+    /// Prefix length in bits
+    pub prefix_length: u8,
+    /// Prefix bytes (variable length based on prefix_length)
+    pub prefix: &'a [u8],
+    /// Number of RIB entries following the prefix
+    pub entry_count: u16,
+    entries_data: &'a [u8],
+}
+
+impl<'a> RibRef<'a> {
+    /// Parse the fixed part of a RIB record from a record body slice.
+    ///
+    /// The entries themselves are not validated here; they are decoded
+    /// on demand by the iterator returned from [`RibRef::entries`].
+    #[inline]
+    pub fn parse(afi: AFI, multicast: bool, addpath: bool, body: &'a [u8]) -> std::io::Result<Self> {
+        fn eof() -> Error {
+            Error::new(ErrorKind::UnexpectedEof, "truncated RIB record")
+        }
+
+        let (seq, rest) = body.split_at_checked(4).ok_or_else(eof)?;
+        let sequence_number = u32::from_be_bytes(seq.try_into().unwrap());
+
+        let (&prefix_length, rest) = rest.split_first().ok_or_else(eof)?;
+        let (prefix, rest) = rest
+            .split_at_checked(prefix_bytes_needed(prefix_length))
+            .ok_or_else(eof)?;
+
+        let (cnt, rest) = rest.split_at_checked(2).ok_or_else(eof)?;
+        let entry_count = u16::from_be_bytes(cnt.try_into().unwrap());
+
+        Ok(RibRef {
+            afi,
+            multicast,
+            addpath,
+            sequence_number,
+            prefix_length,
+            prefix,
+            entry_count,
+            entries_data: rest,
+        })
+    }
+
+    /// Iterate over the RIB entries without allocating.
+    #[inline]
+    pub fn entries(&self) -> RibEntryIter<'a> {
+        RibEntryIter {
+            data: self.entries_data,
+            remaining: self.entry_count,
+            addpath: self.addpath,
+        }
+    }
+}
+
+/// Zero-copy view of a single RIB entry; attributes borrow the body buffer.
+#[derive(Debug, Clone, Copy)]
+pub struct RibEntryRef<'a> {
+    /// Index into the peer index table
+    pub peer_index: u16,
+    /// Time this route was originated
+    pub originated_time: u32,
+    /// Path identifier (ADD-PATH subtypes only)
+    pub path_id: Option<u32>,
+    /// BGP path attributes
+    pub attributes: &'a [u8],
+}
+
+/// Lazy iterator over the entries of a [`RibRef`].
+#[derive(Debug, Clone)]
+pub struct RibEntryIter<'a> {
+    data: &'a [u8],
+    remaining: u16,
+    addpath: bool,
+}
+
+impl<'a> Iterator for RibEntryIter<'a> {
+    type Item = std::io::Result<RibEntryRef<'a>>;
+
+    #[inline]
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.remaining == 0 {
+            return None;
+        }
+        self.remaining -= 1;
+
+        let fixed_len = if self.addpath { 12 } else { 8 };
+        let Some((head, rest)) = self.data.split_at_checked(fixed_len) else {
+            self.remaining = 0;
+            return Some(Err(Error::new(
+                ErrorKind::UnexpectedEof,
+                "truncated RIB entry",
+            )));
+        };
+
+        let peer_index = u16::from_be_bytes([head[0], head[1]]);
+        let originated_time = u32::from_be_bytes([head[2], head[3], head[4], head[5]]);
+        let (path_id, attr_len) = if self.addpath {
+            let path_id = u32::from_be_bytes([head[6], head[7], head[8], head[9]]);
+            (Some(path_id), u16::from_be_bytes([head[10], head[11]]))
+        } else {
+            (None, u16::from_be_bytes([head[6], head[7]]))
+        };
+
+        let Some((attributes, rest)) = rest.split_at_checked(attr_len as usize) else {
+            self.remaining = 0;
+            return Some(Err(Error::new(
+                ErrorKind::UnexpectedEof,
+                "truncated RIB entry attributes",
+            )));
+        };
+        self.data = rest;
+
+        Some(Ok(RibEntryRef {
+            peer_index,
+            originated_time,
+            path_id,
+            attributes,
+        }))
+    }
+
+    #[inline]
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        (0, Some(self.remaining as usize))
+    }
+}
+
 /// Generic RIB record with explicit AFI/SAFI.
 #[derive(Debug, Clone)]
 pub struct RIB_GENERIC {
@@ -526,6 +667,80 @@ mod tests {
         assert_eq!(result.prefix_length, 24);
         assert_eq!(result.peer_address, IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)));
         assert_eq!(result.peer_as, 100);
+    }
+
+    #[test]
+    fn test_rib_ref_matches_owned_parse() {
+        // RIB_IPV4_UNICAST body: sequence=1, /24 prefix 192.168.1, 2 entries
+        let body: &[u8] = &[
+            0x00, 0x00, 0x00, 0x01, // sequence_number = 1
+            24, // prefix_length = 24
+            192, 168, 1, // prefix
+            0x00, 0x02, // entry_count = 2
+            // entry 0
+            0x00, 0x05, // peer_index = 5
+            0x5F, 0x5E, 0x10, 0x00, // originated_time
+            0x00, 0x03, // attr_len = 3
+            0xAA, 0xBB, 0xCC, // attributes
+            // entry 1
+            0x00, 0x06, // peer_index = 6
+            0x5F, 0x5E, 0x10, 0x01, // originated_time
+            0x00, 0x00, // attr_len = 0
+        ];
+
+        let owned = RIB_AFI::parse(&AFI::IPV4, &mut &body[..]).unwrap();
+        let rib = RibRef::parse(AFI::IPV4, false, false, body).unwrap();
+
+        assert_eq!(rib.sequence_number, owned.sequence_number);
+        assert_eq!(rib.prefix_length, owned.prefix_length);
+        assert_eq!(rib.prefix, &owned.prefix[..]);
+        assert_eq!(rib.entry_count as usize, owned.entries.len());
+
+        let entries: Vec<_> = rib.entries().map(|e| e.unwrap()).collect();
+        assert_eq!(entries.len(), owned.entries.len());
+        for (r, o) in entries.iter().zip(&owned.entries) {
+            assert_eq!(r.peer_index, o.peer_index);
+            assert_eq!(r.originated_time, o.originated_time);
+            assert_eq!(r.attributes, &o.attributes[..]);
+            assert_eq!(r.path_id, None);
+        }
+    }
+
+    #[test]
+    fn test_rib_ref_addpath() {
+        let body: &[u8] = &[
+            0x00, 0x00, 0x00, 0x02, // sequence_number = 2
+            16, // prefix_length = 16
+            10, 0, // prefix
+            0x00, 0x01, // entry_count = 1
+            0x00, 0x07, // peer_index = 7
+            0x5F, 0x5E, 0x10, 0x00, // originated_time
+            0x00, 0x00, 0x00, 0x2A, // path_id = 42
+            0x00, 0x02, // attr_len = 2
+            0xDE, 0xAD, // attributes
+        ];
+
+        let rib = RibRef::parse(AFI::IPV4, false, true, body).unwrap();
+        let entries: Vec<_> = rib.entries().map(|e| e.unwrap()).collect();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].peer_index, 7);
+        assert_eq!(entries[0].path_id, Some(42));
+        assert_eq!(entries[0].attributes, &[0xDE, 0xAD]);
+    }
+
+    #[test]
+    fn test_rib_ref_truncated_entry() {
+        let body: &[u8] = &[
+            0x00, 0x00, 0x00, 0x01, // sequence_number
+            24, // prefix_length
+            192, 168, 1, // prefix
+            0x00, 0x01, // entry_count = 1
+            0x00, 0x05, // peer_index (entry truncated after this)
+        ];
+        let rib = RibRef::parse(AFI::IPV4, false, false, body).unwrap();
+        let mut iter = rib.entries();
+        assert!(iter.next().unwrap().is_err());
+        assert!(iter.next().is_none());
     }
 
     #[test]
